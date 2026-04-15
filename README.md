@@ -192,20 +192,58 @@ The threshold is configurable via the `score_threshold` workflow input or the `t
 The CI pipeline runs 7 jobs:
 
 ```
-detect-changes ──┬── generate-tests-copilot ──┬── run-tests ── compute-metrics ── quality-scoring ── pr-comment
-                 └── generate-tests-claudecode ─┘                                                  └── quality-gate
+PR opened / updated
+        │
+        ▼
+┌──────────────────────┐
+│  A: detect-changes   │  Identify & classify changed files
+└────────┬─────────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌────────┐ ┌──────────┐
+│ B1:    │ │ B2:      │  Generate tests (parallel)
+│Copilot │ │Claude    │
+│ Agent  │ │Code Agent│
+└───┬────┘ └────┬─────┘
+    └────┬───────┘
+         ▼
+┌──────────────────────┐
+│  C: run-tests        │  Run all tests (existing + AI-generated)
+└────────┬─────────────┘
+         ▼
+┌──────────────────────┐
+│  D: compute-metrics  │  Aggregate test counts, pass rates, coverage
+└────────┬─────────────┘
+         ▼
+┌──────────────────────┐
+│  E: quality-scoring  │  Lint + score via quality_score.ts script
+│                      │  against quality-rubric.yml
+└────────┬─────────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌────────┐ ┌──────────┐
+│F: PR   │ │G: quality│  (parallel)
+│comment │ │  -gate   │
+│(GH API)│ │(commit   │
+│        │ │ status)  │
+└────────┘ └──────────┘
+                │
+         Pass (score ≥ 70 AND tests ok) → ✅
+         Fail                           → ❌
 ```
 
 | Job | Purpose |
 |---|---|
-| **detect-changes** | Classifies changed files as API routes, services, or components |
-| **generate-tests-copilot** | Invokes Copilot Coding Agent to generate tests |
-| **generate-tests-claudecode** | Invokes Claude Code to generate tests |
-| **run-tests** | Runs all tests (existing + generated) with Vitest |
-| **compute-metrics** | Aggregates test counts, pass rates, and coverage deltas |
-| **quality-scoring** | Runs ESLint + quality rubric scoring engine |
-| **pr-comment** | Posts/updates the quality gate summary on the PR |
-| **quality-gate** | Sets the `ai/quality-gate` commit status |
+| **A: detect-changes** | Classifies changed files as API routes, services, or components |
+| **B1: generate-tests-copilot** | Invokes Copilot Coding Agent to generate tests |
+| **B2: generate-tests-claudecode** | Invokes Claude Code to generate tests |
+| **C: run-tests** | Runs all tests (existing + generated) with Vitest |
+| **D: compute-metrics** | Aggregates test counts, pass rates, and coverage deltas |
+| **E: quality-scoring** | Runs ESLint + scores via `quality_score.ts` against `quality-rubric.yml` |
+| **F: pr-comment** | Posts/updates the quality gate summary on the PR via GitHub API |
+| **G: quality-gate** | Sets the `ai/quality-gate` commit status (pass requires score ≥ threshold AND tests passing) |
 
 ---
 
