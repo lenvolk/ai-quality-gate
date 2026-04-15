@@ -1,0 +1,5 @@
+{
+  "name": "ai-quality-gate-test",
+  "private": true,
+  "workspaces": ["api", "frontend"]
+}

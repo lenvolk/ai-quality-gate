@@ -1,0 +1,84 @@
+# Quality Rubric – AI-assisted code quality scoring
+# Total weight must sum to 100. Each category is scored 0–100 independently.
+# Final score = weighted average of all category scores.
+
+threshold: 70 # Minimum score to pass the quality gate
+
+categories:
+  - name: Correctness & Safety Checks
+    key: correctness
+    weight: 20
+    description: >
+      Logic correctness, null/undefined handling, proper error propagation,
+      no silent failures, correct HTTP status codes, transaction safety.
+    signals:
+      - "All error paths return meaningful responses"
+      - "No unhandled promise rejections or swallowed exceptions"
+      - "Input validation present at system boundaries"
+
+  - name: Test Adequacy & Edge Cases
+    key: test_adequacy
+    weight: 20
+    description: >
+      Sufficient test coverage for changed code, edge-case assertions,
+      error-path tests, boundary conditions, deterministic tests (no flaky timers/network).
+    signals:
+      - "Happy path + error path covered"
+      - "Boundary values tested (empty, zero, max, null)"
+      - "Mocks used instead of real network/timers"
+
+  - name: Maintainability & Readability
+    key: maintainability
+    weight: 15
+    description: >
+      Clear naming, small focused functions/components, no deep nesting,
+      DRY without over-abstraction, consistent code style.
+    signals:
+      - "Functions/components < 150 LOC"
+      - "No duplicated logic across files"
+      - "Consistent naming conventions (camelCase TS, snake_case SQL)"
+
+  - name: Security & Secrets Hygiene
+    key: security
+    weight: 15
+    description: >
+      No hard-coded secrets/tokens, parameterized SQL, input sanitization,
+      no dangerouslySetInnerHTML with untrusted data, CORS restrictions.
+    signals:
+      - "No credentials in source code"
+      - "SQL queries use parameterized statements"
+      - "User input is validated/sanitized"
+
+  - name: Performance Considerations
+    key: performance
+    weight: 10
+    description: >
+      No N+1 query patterns, pagination has max limits, lazy loading for
+      heavy components, no unnecessary re-renders, efficient data structures.
+    signals:
+      - "JOIN queries preferred over per-row SELECTs"
+      - "Pagination limits enforced"
+      - "React.memo or windowing for large lists"
+
+  - name: API/UX Contract Adherence
+    key: contract
+    weight: 10
+    description: >
+      API responses match Swagger spec, consistent response shapes,
+      proper HTTP methods/status codes, UI matches design system patterns.
+    signals:
+      - "Swagger annotations updated for new/changed endpoints"
+      - "Response shape consistent with existing endpoints"
+      - "UI uses shared components and Tailwind patterns"
+
+  - name: Documentation & Comments
+    key: documentation
+    weight: 10
+    description: >
+      Non-obvious logic has explanatory comments, public APIs have JSDoc,
+      architecture docs updated when behavior changes, TODO markers for
+      known gaps.
+    signals:
+      - "Complex algorithms have inline comments"
+      - "New routes have Swagger docs"
+      - "Architecture docs updated if needed"

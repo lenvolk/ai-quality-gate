@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Generated CI artifacts
+quality-score.json
+quality-summary.md
+__generated_tests__/
+*.diff
+
+# Coverage
+coverage/

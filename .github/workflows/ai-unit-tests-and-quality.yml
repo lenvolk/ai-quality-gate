@@ -1,0 +1,629 @@
+name: AI Quality Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      score_threshold:
+        description: "Quality score threshold (0-100)"
+        required: false
+        default: "70"
+      skip_claudecode:
+        description: "Skip Claude Code test generation"
+        required: false
+        type: boolean
+        default: false
+      skip_copilot:
+        description: "Skip Copilot test generation"
+        required: false
+        type: boolean
+        default: false
+
+# Least-privilege permissions
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: ai-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+  SCORE_THRESHOLD: ${{ github.event.inputs.score_threshold || '70' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job A: Detect changes and classify files
+  # ---------------------------------------------------------------------------
+  detect-changes:
+    name: 🔍 Detect & Classify Changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files: ${{ steps.changes.outputs.files }}
+      has_api_changes: ${{ steps.classify.outputs.has_api }}
+      has_frontend_changes: ${{ steps.classify.outputs.has_frontend }}
+      file_categories: ${{ steps.classify.outputs.categories }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            FILES=$(git diff --name-only --diff-filter=ACMR \
+              "$BASE_SHA" \
+              "$HEAD_SHA" | head -200)
+          else
+            FILES=$(git diff --name-only --diff-filter=ACMR HEAD~1 HEAD | head -200)
+          fi
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Classify changed files
+        id: classify
+        env:
+          FILES: ${{ steps.changes.outputs.files }}
+        run: |
+
+          HAS_API="false"
+          HAS_FRONTEND="false"
+          SERVER_ACTIONS=""
+          APIS=""
+          COMPONENTS=""
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            if echo "$file" | grep -qE '^api/src/routes/.*\.ts$'; then
+              HAS_API="true"
+              SERVER_ACTIONS="${SERVER_ACTIONS}${file}\n"
+            elif echo "$file" | grep -qE '^api/src/(repositories|models|utils|db)/.*\.ts$'; then
+              HAS_API="true"
+              APIS="${APIS}${file}\n"
+            elif echo "$file" | grep -qE '^frontend/src/.*\.(tsx?|jsx?)$'; then
+              HAS_FRONTEND="true"
+              COMPONENTS="${COMPONENTS}${file}\n"
+            fi
+          done <<< "$FILES"
+
+          echo "has_api=$HAS_API" >> "$GITHUB_OUTPUT"
+          echo "has_frontend=$HAS_FRONTEND" >> "$GITHUB_OUTPUT"
+
+          CATEGORIES=$(jq -nc \
+            --arg sa "$(echo -e "$SERVER_ACTIONS" | head -50)" \
+            --arg api "$(echo -e "$APIS" | head -50)" \
+            --arg comp "$(echo -e "$COMPONENTS" | head -50)" \
+            '{server_actions: ($sa | split("\n") | map(select(. != ""))),
+              apis: ($api | split("\n") | map(select(. != ""))),
+              components: ($comp | split("\n") | map(select(. != "")))}')
+          echo "categories=$CATEGORIES" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Job B1: Generate tests with Copilot agent
+  # ---------------------------------------------------------------------------
+  generate-tests-copilot:
+    name: 🧪 Generate Tests (Copilot)
+    needs: detect-changes
+    if: >-
+      (needs.detect-changes.outputs.has_api_changes == 'true' ||
+       needs.detect-changes.outputs.has_frontend_changes == 'true') &&
+      github.event.inputs.skip_copilot != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: |
+            api/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install API dependencies
+        if: needs.detect-changes.outputs.has_api_changes == 'true'
+        working-directory: api
+        run: npm ci
+
+      - name: Install Frontend dependencies
+        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Generate tests via Copilot agent
+        env:
+          CHANGED_FILES: ${{ needs.detect-changes.outputs.changed_files }}
+          FILE_CATEGORIES: ${{ needs.detect-changes.outputs.file_categories }}
+        run: |
+          echo "::group::Copilot test generation"
+          mkdir -p __generated_tests__/copilot
+          echo "::endgroup::"
+
+      - name: Invoke Copilot Coding Agent
+        uses: github/copilot-coding-agent@v1
+        with:
+          instructions-file: .github/agents/test-generator-copilot.agent.md
+          prompt: |
+            Generate comprehensive unit tests for the following changed files.
+            Write tests to __generated_tests__/copilot/ and create a manifest.json.
+
+            Changed files:
+            ${{ needs.detect-changes.outputs.changed_files }}
+
+            File categories:
+            ${{ needs.detect-changes.outputs.file_categories }}
+
+            Follow the instructions in .github/agents/test-generator-copilot.agent.md exactly.
+            Use Vitest + Supertest for API tests, Vitest + React Testing Library for components.
+            Write the manifest.json with tool, generatedAt, and tests[] listing each test file.
+          allowedTools: "read,search,edit,terminal"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Copilot test artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: generated-tests-copilot
+          path: __generated_tests__/copilot/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Job B2: Generate tests with Claude Code agent
+  # ---------------------------------------------------------------------------
+  generate-tests-claudecode:
+    name: 🧪 Generate Tests (Claude Code)
+    needs: detect-changes
+    if: >-
+      (needs.detect-changes.outputs.has_api_changes == 'true' ||
+       needs.detect-changes.outputs.has_frontend_changes == 'true') &&
+      github.event.inputs.skip_claudecode != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: |
+            api/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install API dependencies
+        if: needs.detect-changes.outputs.has_api_changes == 'true'
+        working-directory: api
+        run: npm ci
+
+      - name: Install Frontend dependencies
+        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Generate tests via Claude Code agent
+        env:
+          CHANGED_FILES: ${{ needs.detect-changes.outputs.changed_files }}
+          FILE_CATEGORIES: ${{ needs.detect-changes.outputs.file_categories }}
+        run: |
+          echo "::group::Claude Code test generation"
+          mkdir -p __generated_tests__/claudecode
+          echo "::endgroup::"
+
+      - name: Invoke Claude Code Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          instructions-file: .github/agents/test-generator-claudecode.agent.md
+          prompt: |
+            Generate comprehensive unit tests for the following changed files.
+            Write tests to __generated_tests__/claudecode/ and create a manifest.json.
+
+            Changed files:
+            ${{ needs.detect-changes.outputs.changed_files }}
+
+            File categories:
+            ${{ needs.detect-changes.outputs.file_categories }}
+
+            Follow the instructions in .github/agents/test-generator-claudecode.agent.md exactly.
+            Use Vitest + Supertest for API tests, Vitest + React Testing Library for components.
+            Emphasize mutation-resistant tests and parameterized testing.
+            Write the manifest.json with tool, generatedAt, and tests[] listing each test file.
+          allowedTools: "read,search,edit,terminal"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Upload Claude Code test artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: generated-tests-claudecode
+          path: __generated_tests__/claudecode/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Job C: Run generated tests and collect coverage
+  # ---------------------------------------------------------------------------
+  run-tests:
+    name: 🏃 Run Generated Tests
+    needs:
+      - detect-changes
+      - generate-tests-copilot
+      - generate-tests-claudecode
+    if: always() && needs.detect-changes.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      api_test_passed: ${{ steps.api-tests.outcome == 'success' }}
+      frontend_test_passed: ${{ steps.frontend-tests.outcome == 'success' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: |
+            api/package-lock.json
+            frontend/package-lock.json
+
+      - name: Download Copilot test artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: generated-tests-copilot
+          path: __generated_tests__/copilot/
+        continue-on-error: true
+
+      - name: Download Claude Code test artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: generated-tests-claudecode
+          path: __generated_tests__/claudecode/
+        continue-on-error: true
+
+      - name: Install API dependencies
+        if: needs.detect-changes.outputs.has_api_changes == 'true'
+        working-directory: api
+        run: npm ci
+
+      - name: Install Frontend dependencies
+        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run API tests (existing + generated)
+        id: api-tests
+        if: needs.detect-changes.outputs.has_api_changes == 'true'
+        working-directory: api
+        continue-on-error: true
+        run: |
+          npx vitest run --reporter=json --outputFile=../test-results-api.json \
+            --coverage 2>&1 || true
+          echo "API tests completed"
+
+      - name: Run Frontend tests (existing + generated)
+        id: frontend-tests
+        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npx vitest run --reporter=json --outputFile=../test-results-frontend.json \
+            2>&1 || true
+          echo "Frontend tests completed"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results
+          path: |
+            test-results-api.json
+            test-results-frontend.json
+            api/coverage/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Job D: Compute comparative metrics
+  # ---------------------------------------------------------------------------
+  compute-metrics:
+    name: 📊 Compute Comparative Metrics
+    needs:
+      - detect-changes
+      - generate-tests-copilot
+      - generate-tests-claudecode
+      - run-tests
+    if: always() && needs.detect-changes.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      metrics_json: ${{ steps.metrics.outputs.json }}
+    steps:
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts/
+        continue-on-error: true
+
+      - name: Compute metrics
+        id: metrics
+        run: |
+          # Collect metrics from manifests and test results
+          METRICS='{}'
+
+          for tool in copilot claudecode; do
+            MANIFEST="artifacts/generated-tests-${tool}/manifest.json"
+            if [ -f "$MANIFEST" ]; then
+              TEST_COUNT=$(jq '[.tests[]?.testCount // 0] | add // 0' "$MANIFEST")
+            else
+              TEST_COUNT=0
+            fi
+
+            METRICS=$(echo "$METRICS" | jq \
+              --arg tool "$tool" \
+              --argjson count "$TEST_COUNT" \
+              '. + {($tool): {testCount: $count, passRate: 0, coverageDelta: null}}')
+          done
+
+          # Add test pass/fail from results if available
+          for file in artifacts/test-results/test-results-*.json; do
+            [ -f "$file" ] || continue
+            PASSED=$(jq '.numPassedTests // 0' "$file" 2>/dev/null || echo 0)
+            FAILED=$(jq '.numFailedTests // 0' "$file" 2>/dev/null || echo 0)
+            METRICS=$(echo "$METRICS" | jq \
+              --argjson passed "$PASSED" \
+              --argjson failed "$FAILED" \
+              '. + {existingTests: {passed: $passed, failed: $failed}}')
+          done
+
+          echo "json=$(echo "$METRICS" | jq -c .)" >> "$GITHUB_OUTPUT"
+          echo "Metrics: $METRICS"
+
+  # ---------------------------------------------------------------------------
+  # Job E: Quality scoring (lint/static analysis + AI rubric)
+  # ---------------------------------------------------------------------------
+  quality-scoring:
+    name: 📋 Quality Scoring
+    needs:
+      - detect-changes
+      - run-tests
+      - compute-metrics
+    if: always() && needs.detect-changes.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      total_score: ${{ steps.score.outputs.total_score }}
+      pass_fail: ${{ steps.score.outputs.pass_fail }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install API dependencies (for lint)
+        working-directory: api
+        run: npm ci
+
+      - name: Run lint on changed files
+        id: lint
+        working-directory: api
+        continue-on-error: true
+        run: |
+          npx eslint . --format json --output-file ../lint-results.json 2>/dev/null || true
+          if [ ! -f ../lint-results.json ]; then
+            echo '[]' > ../lint-results.json
+          fi
+
+          # Convert ESLint JSON to our expected format
+          ERRORS=$(jq '[.[]?.messages // [] | .[] | select(.severity == 2)] | length' ../lint-results.json 2>/dev/null || echo 0)
+          WARNINGS=$(jq '[.[]?.messages // [] | .[] | select(.severity == 1)] | length' ../lint-results.json 2>/dev/null || echo 0)
+
+          jq -nc \
+            --argjson errors "$ERRORS" \
+            --argjson warnings "$WARNINGS" \
+            '{errors: $errors, warnings: $warnings, files: []}' > lint-results.json
+
+      - name: Generate PR diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff "$BASE_SHA"..."$HEAD_SHA" > pr.diff
+          else
+            git diff HEAD~1 HEAD > pr.diff
+          fi
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: __generated_tests__/
+        continue-on-error: true
+
+      - name: Run quality scoring
+        id: score
+        env:
+          CHANGED_FILES: ${{ needs.detect-changes.outputs.changed_files }}
+          DIFF_FILE: pr.diff
+          LINT_OUTPUT: lint-results.json
+          TEST_RESULTS_DIR: __generated_tests__
+          RUBRIC_FILE: .github/quality-rubric.yml
+          SCORE_THRESHOLD: ${{ env.SCORE_THRESHOLD }}
+        run: |
+          npx tsx .github/scripts/quality_score.ts || true
+
+          if [ -f quality-score.json ]; then
+            TOTAL=$(jq '.totalScore' quality-score.json)
+            PASSFAIL=$(jq -r '.passFail' quality-score.json)
+          else
+            TOTAL=0
+            PASSFAIL="fail"
+          fi
+
+          echo "total_score=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "pass_fail=$PASSFAIL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: quality-reports
+          path: |
+            quality-score.json
+            quality-summary.md
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Job F: Post PR comment with results
+  # ---------------------------------------------------------------------------
+  pr-comment:
+    name: 💬 PR Comment
+    needs:
+      - detect-changes
+      - compute-metrics
+      - quality-scoring
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download quality reports
+        uses: actions/download-artifact@v5
+        with:
+          name: quality-reports
+          path: reports/
+        continue-on-error: true
+
+      - name: Post or update PR comment
+        uses: actions/github-script@v7
+        env:
+          QUALITY_SCORE: ${{ needs.quality-scoring.outputs.total_score }}
+          QUALITY_PASSFAIL: ${{ needs.quality-scoring.outputs.pass_fail }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            let body = '## 🤖 AI Quality Gate Report\n\n';
+
+            const summaryPath = path.join('reports', 'quality-summary.md');
+            if (fs.existsSync(summaryPath)) {
+              body = fs.readFileSync(summaryPath, 'utf-8');
+            } else {
+              const score = process.env.QUALITY_SCORE || 'N/A';
+              const pf = process.env.QUALITY_PASSFAIL || 'unknown';
+              const icon = pf === 'pass' ? '✅' : '❌';
+              body += `**Status:** ${icon} ${pf.toUpperCase()} (score: ${score}/100)\n\n`;
+              body += '> Quality report artifacts were not available.\n';
+            }
+
+            // Find existing comment to update
+            const COMMENT_TAG = '<!-- ai-quality-gate -->';
+            body = COMMENT_TAG + '\n' + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 50,
+            });
+
+            const existing = comments.find(c => c.body?.includes(COMMENT_TAG));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              console.log(`Updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              console.log('Created new comment');
+            }
+
+  # ---------------------------------------------------------------------------
+  # Job G: Quality gate status check
+  # ---------------------------------------------------------------------------
+  quality-gate:
+    name: 🚦 ai/quality-gate
+    needs:
+      - detect-changes
+      - run-tests
+      - quality-scoring
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set commit status
+        uses: actions/github-script@v7
+        env:
+          QUALITY_SCORE: ${{ needs.quality-scoring.outputs.total_score }}
+          QUALITY_PASSFAIL: ${{ needs.quality-scoring.outputs.pass_fail }}
+          QUALITY_THRESHOLD: ${{ env.SCORE_THRESHOLD }}
+          TESTS_RESULT: ${{ needs.run-tests.result }}
+        with:
+          script: |
+            const totalScore = parseFloat(process.env.QUALITY_SCORE) || 0;
+            const passFail = process.env.QUALITY_PASSFAIL || 'fail';
+            const threshold = parseInt(process.env.QUALITY_THRESHOLD) || 70;
+            const testsOk = process.env.TESTS_RESULT !== 'failure';
+
+            const allPass = passFail === 'pass' && testsOk;
+
+            const sha = context.eventName === 'pull_request'
+              ? context.payload.pull_request.head.sha
+              : context.sha;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha,
+              state: allPass ? 'success' : 'failure',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: allPass
+                ? `Quality gate passed (${totalScore}/100, threshold: ${threshold})`
+                : `Quality gate failed (${totalScore}/100, threshold: ${threshold})`,
+              context: 'ai/quality-gate',
+            });
+
+            console.log(`Set status: ${allPass ? 'success' : 'failure'} (score: ${totalScore})`);
+
+      - name: Gate result
+        env:
+          PASS_FAIL: ${{ needs.quality-scoring.outputs.pass_fail }}
+          TESTS_RESULT: ${{ needs.run-tests.result }}
+          TOTAL_SCORE: ${{ needs.quality-scoring.outputs.total_score }}
+        run: |
+          if [ "$PASS_FAIL" = "pass" ] && [ "$TESTS_RESULT" != "failure" ]; then
+            echo "✅ Quality gate PASSED"
+            exit 0
+          else
+            echo "❌ Quality gate FAILED (score: $TOTAL_SCORE, tests: $TESTS_RESULT)"
+            exit 1
+          fi
