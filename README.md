@@ -99,11 +99,14 @@ npx vitest run --coverage   # run with coverage report
 
 ---
 
-## Running the Workflow
+## How the Workflow Runs
 
-### Automatic (on pull request)
+The workflow triggers in two ways:
 
-The workflow triggers automatically when a PR is **opened** or **updated** (`synchronize`). It will:
+- **Automatically** — on every PR opened or updated (`synchronize`)
+- **Manually** — via **Actions → AI Quality Gate → Run workflow**
+
+Once triggered, it will:
 
 1. Detect which files changed and classify them (API routes, services, React components)
 2. Run **Copilot** and **Claude Code** agents in parallel to generate tests
@@ -113,9 +116,7 @@ The workflow triggers automatically when a PR is **opened** or **updated** (`syn
 6. Post a summary comment on the PR
 7. Set a `ai/quality-gate` commit status (pass/fail)
 
-### Manual (workflow_dispatch)
-
-Go to **Actions → AI Quality Gate → Run workflow** and configure:
+### Manual dispatch inputs
 
 | Input | Default | Description |
 |---|---|---|
@@ -127,7 +128,7 @@ Go to **Actions → AI Quality Gate → Run workflow** and configure:
 
 ## Testing the Workflow
 
-### Quick test: Manual dispatch
+### Option A: Manual dispatch (quickest)
 
 1. Go to your repo's **Actions** tab
 2. Select **AI Quality Gate** from the left sidebar
@@ -135,7 +136,7 @@ Go to **Actions → AI Quality Gate → Run workflow** and configure:
 4. (Optional) Set `skip_claudecode: true` if you haven't added `ANTHROPIC_API_KEY` yet
 5. Click **Run workflow** and watch the jobs execute
 
-### Full test: Open a pull request
+### Option B: Open a pull request (full end-to-end)
 
 ```bash
 # Create a feature branch
