@@ -14,11 +14,6 @@ on:
         required: false
         type: boolean
         default: false
-      skip_copilot:
-        description: "Skip Copilot test generation"
-        required: false
-        type: boolean
-        default: false
 
 # Least-privilege permissions
 permissions:
@@ -110,70 +105,7 @@ jobs:
           echo "categories=$CATEGORIES" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
-  # Job B1: Generate tests with Copilot agent
-  # ---------------------------------------------------------------------------
-  generate-tests-copilot:
-    name: 🧪 Generate Tests (Copilot)
-    needs: detect-changes
-    if: >-
-      (needs.detect-changes.outputs.has_api_changes == 'true' ||
-       needs.detect-changes.outputs.has_frontend_changes == 'true') &&
-      github.event.inputs.skip_copilot != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Generate tests via Copilot agent
-        env:
-          CHANGED_FILES: ${{ needs.detect-changes.outputs.changed_files }}
-          FILE_CATEGORIES: ${{ needs.detect-changes.outputs.file_categories }}
-        run: |
-          echo "::group::Copilot test generation"
-          mkdir -p __generated_tests__/copilot
-          echo "::endgroup::"
-
-      - name: Invoke Copilot Coding Agent
-        uses: github/copilot-coding-agent@v1
-        with:
-          instructions-file: .github/agents/test-generator-copilot.agent.md
-          prompt: |
-            Generate comprehensive unit tests for the following changed files.
-            Write tests to __generated_tests__/copilot/ and create a manifest.json.
-
-            Changed files:
-            ${{ needs.detect-changes.outputs.changed_files }}
-
-            File categories:
-            ${{ needs.detect-changes.outputs.file_categories }}
-
-            Follow the instructions in .github/agents/test-generator-copilot.agent.md exactly.
-            Use Vitest + Supertest for API tests, Vitest + React Testing Library for components.
-            Write the manifest.json with tool, generatedAt, and tests[] listing each test file.
-          allowedTools: "read,search,edit,terminal"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Copilot test artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: generated-tests-copilot
-          path: __generated_tests__/copilot/
-          retention-days: 14
-          if-no-files-found: warn
-
-  # ---------------------------------------------------------------------------
-  # Job B2: Generate tests with Claude Code agent
+  # Job B: Generate tests with Claude Code agent
   # ---------------------------------------------------------------------------
   generate-tests-claudecode:
     name: 🧪 Generate Tests (Claude Code)
@@ -244,7 +176,6 @@ jobs:
     name: 🏃 Run Generated Tests
     needs:
       - detect-changes
-      - generate-tests-copilot
       - generate-tests-claudecode
     if: always() && needs.detect-changes.result == 'success'
     runs-on: ubuntu-latest
@@ -261,13 +192,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
           cache-dependency-path: package-lock.json
-
-      - name: Download Copilot test artifacts
-        uses: actions/download-artifact@v7
-        with:
-          name: generated-tests-copilot
-          path: __generated_tests__/copilot/
-        continue-on-error: true
 
       - name: Download Claude Code test artifacts
         uses: actions/download-artifact@v7
@@ -318,7 +242,6 @@ jobs:
     name: 📊 Compute Comparative Metrics
     needs:
       - detect-changes
-      - generate-tests-copilot
       - generate-tests-claudecode
       - run-tests
     if: always() && needs.detect-changes.result == 'success'
@@ -338,7 +261,7 @@ jobs:
           # Collect metrics from manifests and test results
           METRICS='{}'
 
-          for tool in copilot claudecode; do
+          for tool in claudecode; do
             MANIFEST="artifacts/generated-tests-${tool}/manifest.json"
             if [ -f "$MANIFEST" ]; then
               TEST_COUNT=$(jq '[.tests[]?.testCount // 0] | add // 0' "$MANIFEST")
