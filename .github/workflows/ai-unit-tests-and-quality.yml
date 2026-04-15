@@ -131,14 +131,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: package-lock.json
 
-      - name: Install API dependencies
-        if: needs.detect-changes.outputs.has_api_changes == 'true'
-        working-directory: api
-        run: npm ci
-
-      - name: Install Frontend dependencies
-        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
-        working-directory: frontend
+      - name: Install dependencies
         run: npm ci
 
       - name: Generate tests via Copilot agent
@@ -201,14 +194,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: package-lock.json
 
-      - name: Install API dependencies
-        if: needs.detect-changes.outputs.has_api_changes == 'true'
-        working-directory: api
-        run: npm ci
-
-      - name: Install Frontend dependencies
-        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
-        working-directory: frontend
+      - name: Install dependencies
         run: npm ci
 
       - name: Generate tests via Claude Code agent
@@ -277,27 +263,20 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Download Copilot test artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: generated-tests-copilot
           path: __generated_tests__/copilot/
         continue-on-error: true
 
       - name: Download Claude Code test artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: generated-tests-claudecode
           path: __generated_tests__/claudecode/
         continue-on-error: true
 
-      - name: Install API dependencies
-        if: needs.detect-changes.outputs.has_api_changes == 'true'
-        working-directory: api
-        run: npm ci
-
-      - name: Install Frontend dependencies
-        if: needs.detect-changes.outputs.has_frontend_changes == 'true'
-        working-directory: frontend
+      - name: Install dependencies
         run: npm ci
 
       - name: Run API tests (existing + generated)
@@ -348,7 +327,7 @@ jobs:
       metrics_json: ${{ steps.metrics.outputs.json }}
     steps:
       - name: Download all test artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: artifacts/
         continue-on-error: true
@@ -414,8 +393,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: package-lock.json
 
-      - name: Install API dependencies (for lint)
-        working-directory: api
+      - name: Install dependencies
         run: npm ci
 
       - name: Run lint on changed files
@@ -450,7 +428,7 @@ jobs:
           fi
 
       - name: Download test artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: __generated_tests__/
         continue-on-error: true
@@ -502,7 +480,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download quality reports
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: quality-reports
           path: reports/
