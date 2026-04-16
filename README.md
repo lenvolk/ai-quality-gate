@@ -180,7 +180,7 @@ Then open a PR from `test/trigger-workflow` → `main` on GitHub. The workflow r
 
 ## Quality Scoring Rubric
 
-The scoring engine evaluates PRs across 7 weighted categories (defined in [quality-rubric.yml](quality-rubric.yml)):
+The scoring engine evaluates PRs across 7 weighted categories (defined in [quality-rubric.yml](.github/quality-rubric.yml)):
 
 | Category | Weight | Key Signals |
 |---|---|---|
@@ -284,7 +284,7 @@ This data appears in the PR comment under **Test Generation Summary**.
 
 ### Adjust the rubric
 
-Edit [quality-rubric.yml](quality-rubric.yml) to change category weights, signals, or the pass/fail threshold.
+Edit [quality-rubric.yml](.github/quality-rubric.yml) to change category weights, signals, or the pass/fail threshold.
 
 ### Modify agent behavior
 
